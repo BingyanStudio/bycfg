@@ -136,3 +136,7 @@ func (b *Bycfg[T]) WatchConfig(d time.Duration) {
 		}
 	}()
 }
+
+func init() {
+	callbackRegistry = map[string]func() error{}
+}
