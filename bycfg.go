@@ -110,7 +110,14 @@ func (b *Bycfg[T]) ReloadConfig() error {
 			if callbackName == "" {
 				continue
 			}
-			err = callbackRegistry[callbackName]()
+
+			callback, exists := callbackRegistry[callbackName]
+			if !exists {
+				err = fmt.Errorf("callback %s is not registered", callbackName)
+				break
+			}
+
+			err = callback()
 			if err != nil {
 				break
 			}
