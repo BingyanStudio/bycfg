@@ -3,6 +3,7 @@ package bycfg
 import (
 	"fmt"
 	"reflect"
+	"sync"
 	"time"
 
 	"github.com/BingyanStudio/bycfg/internal/set"
@@ -10,10 +11,20 @@ import (
 	"github.com/go-playground/errors/v5"
 )
 
+var muCallbackRegistry sync.RWMutex
 var callbackRegistry map[string]func() error
 
-func RegisterCallback(name string, cb func() error) {
-	callbackRegistry[name] = cb
+func RegisterCallback(name string, callback func() error) {
+	muCallbackRegistry.Lock()
+	defer muCallbackRegistry.Unlock()
+	callbackRegistry[name] = callback
+}
+
+func getCallback(name string) (func() error, bool) {
+	muCallbackRegistry.RLock()
+	defer muCallbackRegistry.RUnlock()
+	callback, exists := callbackRegistry[name]
+	return callback, exists
 }
 
 type Bycfg[T any] struct {
@@ -21,7 +32,8 @@ type Bycfg[T any] struct {
 	defaultReload func() error
 	onReloadError func(error)
 
-	C T
+	muConfig sync.RWMutex
+	config   T
 }
 
 // assume newValue.Type() == oldValue.Type()
@@ -89,20 +101,29 @@ func New[T any](url string,
 		url:           url,
 		defaultReload: defaultReload,
 		onReloadError: onReloadError,
-		C:             c,
+		config:        c,
 	}, nil
 }
 
+func (b *Bycfg[T]) GetConfig() T {
+	b.muConfig.RLock()
+	defer b.muConfig.RUnlock()
+	return b.config
+}
+
 func (b *Bycfg[T]) ReloadConfig() error {
-	oldC := b.C
-	newC, err := utils.GetConfig[T](b.url)
+	b.muConfig.Lock()
+	defer b.muConfig.Unlock()
+
+	oldConfig := b.config
+	newConfig, err := utils.GetConfig[T](b.url)
 	if err != nil {
 		return errors.Wrap(err, "failed to get new config")
 	}
 
-	callbacks := collectCallbacks(reflect.ValueOf(newC), reflect.ValueOf(oldC), nil)
+	callbacks := collectCallbacks(reflect.ValueOf(newConfig), reflect.ValueOf(oldConfig), nil)
 
-	b.C = newC
+	b.config = newConfig
 	if callbacks == nil {
 		err = b.defaultReload()
 	} else {
@@ -111,7 +132,7 @@ func (b *Bycfg[T]) ReloadConfig() error {
 				continue
 			}
 
-			callback, exists := callbackRegistry[callbackName]
+			callback, exists := getCallback(callbackName)
 			if !exists {
 				err = fmt.Errorf("callback %s is not registered", callbackName)
 				break
@@ -124,7 +145,7 @@ func (b *Bycfg[T]) ReloadConfig() error {
 		}
 	}
 	if err != nil {
-		b.C = oldC
+		b.config = oldConfig
 		return errors.Wrap(err, "failed to reload config")
 	}
 
