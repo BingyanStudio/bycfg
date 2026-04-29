@@ -1,170 +1,181 @@
 package bycfg
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
-	"reflect"
+	"io"
+	"net/http"
 	"sync"
 	"time"
 
-	"github.com/BingyanStudio/bycfg/internal/set"
-	"github.com/BingyanStudio/bycfg/internal/utils"
 	"github.com/go-playground/errors/v5"
+	"github.com/pelletier/go-toml/v2"
+	"go.yaml.in/yaml/v4"
 )
 
-var muCallbackRegistry sync.RWMutex
-var callbackRegistry map[string]func() error
+func getConfig[T any](url string, httpClient http.Client) (T, error) {
+	var res T
 
-func RegisterCallback(name string, callback func() error) {
-	muCallbackRegistry.Lock()
-	defer muCallbackRegistry.Unlock()
-	callbackRegistry[name] = callback
-}
+	httpResp, err := httpClient.Get(url)
+	if err != nil {
+		return res, errors.Wrap(err, "failed to perform request")
+	}
 
-func getCallback(name string) (func() error, bool) {
-	muCallbackRegistry.RLock()
-	defer muCallbackRegistry.RUnlock()
-	callback, exists := callbackRegistry[name]
-	return callback, exists
+	body, err := io.ReadAll(httpResp.Body)
+	if err != nil {
+		return res, errors.Wrap(err, "failed to read response body")
+	}
+
+	var resp struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+		Data    struct {
+			Name  string `json:"name"`
+			Type  string `json:"type"`
+			Value string `json:"value"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return res, errors.Wrap(err, "failed to unmarshal response")
+	}
+
+	config := resp.Data
+
+	switch any(res).(type) {
+	case string:
+		return any(config.Value).(T), nil
+	default:
+		switch config.Type {
+		case "json":
+			err := json.Unmarshal([]byte(config.Value), &res)
+			if err != nil {
+				return res, errors.Wrap(err, "failed to unmarshall json config")
+			}
+			return res, nil
+		case "yaml":
+			err := yaml.Unmarshal([]byte(config.Value), &res)
+			if err != nil {
+				return res, errors.Wrap(err, "failed to unmarshall yaml config")
+			}
+			return res, nil
+		case "toml":
+			err := toml.Unmarshal([]byte(config.Value), &res)
+			if err != nil {
+				return res, errors.Wrap(err, "failed to unmarshall toml config")
+			}
+			return res, nil
+		default:
+			return res, fmt.Errorf("unexpected kv config type %s", config.Type)
+		}
+	}
 }
 
 type Bycfg[T any] struct {
-	url           string
-	defaultReload func() error
-	onReloadError func(error)
+	configCenterHost string
+	applicationName  string
+	configName       string
+	reloadCallback   func(T, T) (bool, error)
+	httpClient       http.Client
 
 	muConfig sync.RWMutex
 	config   T
 }
 
-// assume newValue.Type() == oldValue.Type()
-func collectCallbacks(newValue, oldValue reflect.Value, callback *string) set.Set[string] {
-	if newValue.Kind() == reflect.Pointer {
-		if newValue.IsNil() != oldValue.IsNil() {
-			return set.FromPtr(callback)
-		}
-
-		if newValue.IsNil() {
-			return set.New[string]()
-		}
-
-		newValue, oldValue = newValue.Elem(), oldValue.Elem()
-	}
-
-	if newValue.Kind() != reflect.Struct {
-		if reflect.DeepEqual(newValue.Interface(), oldValue.Interface()) {
-			return set.New[string]()
-		} else {
-			return set.FromPtr(callback)
-		}
-	}
-
-	callbacks := set.New[string]()
-
-	for i := range newValue.NumField() {
-		newValueField, oldValueField := newValue.Field(i), oldValue.Field(i)
-
-		var fieldCallback *string
-		val, exist := newValue.Type().Field(i).Tag.Lookup("bycfg")
-		if exist {
-			fieldCallback = &val
-		}
-
-		fieldCallbacks := collectCallbacks(newValueField, oldValueField, fieldCallback)
-
-		if fieldCallbacks != nil {
-			callbacks.Insert(fieldCallbacks)
-		} else {
-			return set.FromPtr(callback)
-		}
-	}
-
-	return callbacks
+func (c *Bycfg[T]) getConfig() (T, error) {
+	return getConfig[T](fmt.Sprintf("http://%s/client/%s/%s", c.configCenterHost, c.applicationName, c.configName), c.httpClient)
 }
 
-func New[T any](url string,
-	defaultReload func() error,
-	onReloadError func(error),
-) (Bycfg[T], error) {
-	c, err := utils.GetConfig[T](url)
-	if err != nil {
-		return Bycfg[T]{}, errors.Wrap(err, "failed to initalize config")
-	}
-
-	if defaultReload == nil {
-		defaultReload = func() error { return nil }
-	}
-	if onReloadError == nil {
-		onReloadError = func(err error) { fmt.Printf("%+v\n", err) }
-	}
-
-	return Bycfg[T]{
-		url:           url,
-		defaultReload: defaultReload,
-		onReloadError: onReloadError,
-		config:        c,
-	}, nil
+func (c *Bycfg[T]) restart() error {
+	_, err := c.httpClient.Post(fmt.Sprintf("http://%s/client/%s/restart", c.configCenterHost, c.applicationName), "", nil)
+	return errors.Wrap(err, "failed to restart pod")
 }
 
-func (b *Bycfg[T]) GetConfig() T {
-	b.muConfig.RLock()
-	defer b.muConfig.RUnlock()
-	return b.config
+type NewBycfgParams[T any] struct {
+	configCenterHost string
+	httpClient       http.Client
+	reloadCallback   func(T, T) (bool, error)
 }
 
-func (b *Bycfg[T]) ReloadConfig() error {
-	b.muConfig.Lock()
-	defer b.muConfig.Unlock()
+func (p *NewBycfgParams[T]) setDefault() {
+	if p.configCenterHost == "" {
+		p.configCenterHost = "config-center-next.config-center-next"
+	}
+}
 
-	oldConfig := b.config
-	newConfig, err := utils.GetConfig[T](b.url)
-	if err != nil {
-		return errors.Wrap(err, "failed to get new config")
+func New[T any](applicationName string, configName string, p *NewBycfgParams[T]) (*Bycfg[T], error) {
+	params := NewBycfgParams[T]{}
+	if p != nil {
+		params = *p
+	}
+	params.setDefault()
+
+	res := Bycfg[T]{
+		configCenterHost: params.configCenterHost,
+		applicationName:  applicationName,
+		configName:       configName,
+		reloadCallback:   params.reloadCallback,
+		httpClient:       params.httpClient,
 	}
 
-	callbacks := collectCallbacks(reflect.ValueOf(newConfig), reflect.ValueOf(oldConfig), nil)
+	value, err := res.getConfig()
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to get config")
+	}
 
-	b.config = newConfig
-	if callbacks == nil {
-		err = b.defaultReload()
-	} else {
-		for callbackName := range callbacks {
-			if callbackName == "" {
-				continue
-			}
+	res.config = value
+	return &res, nil
+}
 
-			callback, exists := getCallback(callbackName)
-			if !exists {
-				err = fmt.Errorf("callback %s is not registered", callbackName)
-				break
-			}
+func (c *Bycfg[T]) Get() T {
+	c.muConfig.RLock()
+	defer c.muConfig.RUnlock()
+	return c.config
+}
 
-			err = callback()
-			if err != nil {
-				break
-			}
+func (c *Bycfg[T]) Reload() error {
+	newValue, err := c.getConfig()
+	if err != nil {
+		return errors.Wrap(err, "failed to get config")
+	}
+
+	c.muConfig.Lock()
+	oldValue := c.config
+	c.config = newValue
+	c.muConfig.Unlock()
+
+	defer func() {
+		if r := recover(); r != nil {
+			// TODO recover when user callback failed
 		}
-	}
+	}()
+
+	needRestart, err := c.reloadCallback(oldValue, newValue)
 	if err != nil {
-		b.config = oldConfig
-		return errors.Wrap(err, "failed to reload config")
+		return errors.Wrap(err, "failed to execute user reload callback")
+	}
+	if needRestart {
+		err := c.restart()
+		if err != nil {
+			return errors.Wrap(err, "failed to restart")
+		}
 	}
 
 	return nil
 }
 
-func (b *Bycfg[T]) WatchConfig(d time.Duration) {
+func (c *Bycfg[T]) Watch(d time.Duration, ctx context.Context) {
 	go func() {
-		ticker := time.NewTicker(d)
-		defer ticker.Stop()
-		for range ticker.C {
-			err := b.ReloadConfig()
-			if err != nil {
-				b.onReloadError(err)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(d):
+				err := c.Reload()
+				if err != nil {
+					// log error
+				}
 			}
 		}
 	}()
-}
-
-func init() {
-	callbackRegistry = map[string]func() error{}
 }
