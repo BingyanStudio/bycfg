@@ -71,12 +71,41 @@ func getConfig[T any](url string, httpClient http.Client) (T, error) {
 	}
 }
 
+type Logger interface {
+	Info(msg string, keyvals ...any)
+	Error(msg string, keyvals ...any)
+}
+
+type NewBycfgParams[T any] struct {
+	configCenterHost string
+	httpClient       http.Client
+	reloadCallback   func(oldValue T, newValue T) (needRestart bool, err error)
+	logger           Logger
+}
+
+type dummyLogger struct{}
+
+func (dummyLogger) Info(string, ...any)  {}
+func (dummyLogger) Error(string, ...any) {}
+
+var defaultLogger Logger = dummyLogger{}
+
+func (p *NewBycfgParams[T]) setDefault() {
+	if p.configCenterHost == "" {
+		p.configCenterHost = "config-center-next.config-center-next"
+	}
+	if p.logger == nil {
+		p.logger = defaultLogger
+	}
+}
+
 type Bycfg[T any] struct {
 	configCenterHost string
 	applicationName  string
 	configName       string
-	reloadCallback   func(T, T) (bool, error)
+	reloadCallback   func(oldValue T, newValue T) (needRestart bool, err error)
 	httpClient       http.Client
+	logger           Logger
 
 	muConfig sync.RWMutex
 	config   T
@@ -89,18 +118,6 @@ func (c *Bycfg[T]) getConfig() (T, error) {
 func (c *Bycfg[T]) restart() error {
 	_, err := c.httpClient.Post(fmt.Sprintf("http://%s/client/%s/restart", c.configCenterHost, c.applicationName), "", nil)
 	return errors.Wrap(err, "failed to restart pod")
-}
-
-type NewBycfgParams[T any] struct {
-	configCenterHost string
-	httpClient       http.Client
-	reloadCallback   func(T, T) (bool, error)
-}
-
-func (p *NewBycfgParams[T]) setDefault() {
-	if p.configCenterHost == "" {
-		p.configCenterHost = "config-center-next.config-center-next"
-	}
 }
 
 func New[T any](applicationName string, configName string, p *NewBycfgParams[T]) (*Bycfg[T], error) {
@@ -116,6 +133,7 @@ func New[T any](applicationName string, configName string, p *NewBycfgParams[T])
 		configName:       configName,
 		reloadCallback:   params.reloadCallback,
 		httpClient:       params.httpClient,
+		logger:           params.logger,
 	}
 
 	value, err := res.getConfig()
@@ -133,24 +151,22 @@ func (c *Bycfg[T]) Get() T {
 	return c.config
 }
 
-func (c *Bycfg[T]) Reload() error {
+func (c *Bycfg[T]) Reload() (err error) {
 	newValue, err := c.getConfig()
 	if err != nil {
 		return errors.Wrap(err, "failed to get config")
 	}
 
 	c.muConfig.Lock()
-	oldValue := c.config
-	c.config = newValue
-	c.muConfig.Unlock()
+	defer c.muConfig.Unlock()
 
 	defer func() {
 		if r := recover(); r != nil {
-			// TODO recover when user callback failed
+			err = fmt.Errorf("reload callback panicked: %v", r)
 		}
 	}()
 
-	needRestart, err := c.reloadCallback(oldValue, newValue)
+	needRestart, err := c.reloadCallback(c.config, newValue)
 	if err != nil {
 		return errors.Wrap(err, "failed to execute user reload callback")
 	}
@@ -160,6 +176,8 @@ func (c *Bycfg[T]) Reload() error {
 			return errors.Wrap(err, "failed to restart")
 		}
 	}
+
+	c.config = newValue
 
 	return nil
 }
@@ -171,9 +189,12 @@ func (c *Bycfg[T]) Watch(d time.Duration, ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-time.After(d):
+				c.logger.Info("scheduled config reloading start", "config_name", c.configName)
 				err := c.Reload()
 				if err != nil {
-					// log error
+					c.logger.Error("failed to reload config", "config_name", c.configName, "error", err)
+				} else {
+					c.logger.Info("successfully reloaded config", "config_name", c.configName)
 				}
 			}
 		}
