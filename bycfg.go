@@ -109,6 +109,8 @@ type Bycfg[T any] struct {
 
 	muConfig sync.RWMutex
 	config   T
+
+	muReload sync.Mutex
 }
 
 func (c *Bycfg[T]) getConfig() (T, error) {
@@ -152,23 +154,26 @@ func (c *Bycfg[T]) Get() T {
 }
 
 func (c *Bycfg[T]) Reload() (err error) {
+	c.muReload.Lock()
+	defer c.muReload.Unlock()
+
 	newValue, err := c.getConfig()
 	if err != nil {
 		return errors.Wrap(err, "failed to get config")
 	}
 
-	c.muConfig.Lock()
-	defer c.muConfig.Unlock()
+	c.muConfig.RLock()
+	oldValue := c.config
+	c.muConfig.Unlock()
 
 	defer func() {
 		if r := recover(); r != nil {
-			err = fmt.Errorf("reload callback panicked: %v", r)
+			err = fmt.Errorf("failed to call reload callback: %v", r)
 		}
 	}()
-
-	needRestart, err := c.reloadCallback(c.config, newValue)
+	needRestart, err := c.reloadCallback(oldValue, newValue)
 	if err != nil {
-		return errors.Wrap(err, "failed to execute user reload callback")
+		return errors.Wrap(err, "failed to call reload callback")
 	}
 	if needRestart {
 		err := c.restart()
@@ -177,7 +182,9 @@ func (c *Bycfg[T]) Reload() (err error) {
 		}
 	}
 
+	c.muConfig.Lock()
 	c.config = newValue
+	c.muConfig.Unlock()
 
 	return nil
 }
