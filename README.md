@@ -6,13 +6,13 @@ Go SDK for [config-center-next](https://github.com/BingyanStudio/config-center-n
 
 ```go
 var (
-	globalComment   string
-	muGlobalComment sync.RWMutex
+	someGlobalState   string
+	muSomeGlobalState sync.RWMutex
 )
 
 type Config struct {
-	DSN     string `json:"dsn"`
-	Comment string `json:"comment"`
+	DSN       string `json:"dsn"`
+	SomeState string `json:"some_state"`
 }
 
 func main() {
@@ -34,9 +34,9 @@ func main() {
 
 		// 此回调在 NeedRestart 传回 false 时被调用，处理无需重启就能处理的配置项变动
 		ReloadCallback: func(newValue Config) error {
-			muGlobalComment.Lock()
-			globalComment = newValue.Comment
-			muGlobalComment.Unlock()
+			muSomeGlobalState.Lock()
+			someGlobalState = newValue.SomeState
+			muSomeGlobalState.Unlock()
 			return nil
 		},
 
@@ -49,7 +49,6 @@ func main() {
 
 	// 手动重载
 	cfg.Reload()
-
 
 	// 启动热更新
 	ctx, cancel := context.WithCancel(context.Background())
