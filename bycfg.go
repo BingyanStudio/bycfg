@@ -184,7 +184,11 @@ func (c *Bycfg[T]) Reload() (err error) {
 	c.muConfig.RUnlock()
 
 	if c.needRestart(oldValue, newValue) {
-		return errors.Wrap(c.restart(), "failed to restart")
+		err := c.restart()
+		if err != nil {
+			return errors.Wrap(err, "failed to restart")
+		}
+		return nil
 	}
 
 	defer func() {
