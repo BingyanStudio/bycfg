@@ -178,7 +178,7 @@ func (c *Bycfg[T]) Reload() (err error) {
 
 	c.muConfig.RLock()
 	oldValue := c.config
-	c.muConfig.Unlock()
+	c.muConfig.RUnlock()
 
 	if c.needRestart(oldValue, newValue) {
 		return errors.Wrap(c.restart(), "failed to restart")
