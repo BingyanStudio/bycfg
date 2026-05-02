@@ -132,7 +132,10 @@ func (c *Bycfg[T]) getConfig() (T, error) {
 
 func (c *Bycfg[T]) restart() error {
 	_, err := c.httpClient.Post(fmt.Sprintf("http://%s/client/%s/restart", c.configCenterHost, c.applicationName), "", nil)
-	return errors.Wrap(err, "failed to restart pod")
+	if err != nil {
+		return errors.Wrap(err, "failed to restart pod")
+	}
+	return nil
 }
 
 func New[T any](applicationName string, configName string, p *BycfgParams[T]) (*Bycfg[T], error) {
