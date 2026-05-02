@@ -208,7 +208,7 @@ func (c *Bycfg[T]) Watch(d time.Duration, ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-time.After(d):
-				c.logger.Info("scheduled config reloading start", "config_name", c.configName)
+				c.logger.Info("starting scheduled config reload", "config_name", c.configName)
 				err := c.Reload()
 				if err != nil {
 					c.logger.Error("failed to reload config", "config_name", c.configName, "error", err)
