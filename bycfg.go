@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"reflect"
 	"sync"
@@ -22,11 +21,7 @@ func getConfig[T any](url string, httpClient http.Client) (T, error) {
 	if err != nil {
 		return res, errors.Wrap(err, "failed to perform request")
 	}
-
-	body, err := io.ReadAll(httpResp.Body)
-	if err != nil {
-		return res, errors.Wrap(err, "failed to read response body")
-	}
+	defer httpResp.Body.Close()
 
 	var resp struct {
 		Code    int    `json:"code"`
@@ -37,7 +32,7 @@ func getConfig[T any](url string, httpClient http.Client) (T, error) {
 			Value string `json:"value"`
 		} `json:"data"`
 	}
-	if err := json.Unmarshal(body, &resp); err != nil {
+	if err := json.NewDecoder(httpResp.Body).Decode(&resp); err != nil {
 		return res, errors.Wrap(err, "failed to unmarshal response")
 	}
 
